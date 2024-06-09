@@ -1,0 +1,485 @@
+name: moneybase
+
+x-healthcheck: &healthcheck
+  interval: 3s
+  timeout: 60s
+  retries: 20
+x-environment:
+  SA_PASSWORD: &sa-password "${SA_PASSWORD:-Password1!}"
+
+services:
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    hostname: zookeeper
+    restart: always
+    ports:
+      - 2181:2181
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok"
+    healthcheck:
+      test: echo ruok | nc zookeeper 2181 | grep imok
+      <<: *healthcheck
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper
+
+  kafka:
+    image: &kafka-image confluentinc/cp-kafka:latest
+    hostname: kafka
+    restart: always
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - 9092:9092
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
+    healthcheck:
+      test: kafka-topics --list --bootstrap-server kafka:9092 || exit 1
+      <<: *healthcheck
+    volumes:
+      - kafka-data:/var/lib/kafka
+
+  kafka-init:
+    image: *kafka-image
+    restart: no
+    depends_on:
+      kafka:
+        condition: service_healthy
+    env_file:
+      - .env
+    configs:
+      - source: kafka-init.setup.sh
+        target: /init/setup.sh
+    entrypoint: 
+      - /bin/bash 
+      - /init/setup.sh
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:latest
+    hostname: schema-registry
+    restart: always
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - 8081:8081
+    environment:
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9092
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    healthcheck:
+      test: curl --silent --head --fail http://schema-registry:8081/subjects || exit 1
+      <<: *healthcheck
+
+  sqlserver:
+    # image: &sqlserver-image mcr.microsoft.com/mssql/server:latest
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    hostname: sqlserver
+    restart: always
+    ports:
+      - 1433:1433
+    environment:
+      SA_PASSWORD: *sa-password
+      ACCEPT_EULA: Y
+      MSSQL_PID:   Developer
+      MSSQL_AGENT_ENABLED: true
+      # 
+      # SQLCMDSERVER:   sqlserver
+      # SQLCMDUSER:     sa
+      # SQLCMDPASSWORD: *sa-password
+    healthcheck:
+      # test: /opt/mssql-tools/bin/sqlcmd -Q "select 1" || exit 1
+      test: python3 /healthcheck.py # in azure-sql-edge image there is no sqlcmd installed, neither netcat
+      <<: *healthcheck
+    configs:
+      - source: sqlserver.healthcheck.py
+        target: /healthcheck.py
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+
+  sqlserver-init:
+    # image: *sqlserver-image
+    image: mcr.microsoft.com/mssql-tools:latest
+    platform: linux/amd64
+    restart: no
+    stdin_open: true
+    depends_on: 
+      sqlserver:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      SQLCMDSERVER:   sqlserver
+      SQLCMDUSER:     sa
+      SQLCMDPASSWORD: *sa-password
+      SQLCMDDATABASE: master
+    configs:
+      - source: sqlserver-init.setup.sh
+        target: /init/setup.sh
+      - source: sqlserver-init.setup.sql
+        target: /init/setup.sql
+    entrypoint: 
+      - /bin/bash
+      - /init/setup.sh
+
+  kafka-connect:
+    image: &connect-image debezium/connect:2.6.2.Final
+    hostname: kafka-connect
+    restart: always
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      schema-registry:
+        condition: service_started
+      sqlserver:
+        condition: service_started
+      sqlserver-init:
+        condition: service_completed_successfully
+    ports:
+      - 8083:8083
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: sqlserver
+      CONFIG_STORAGE_TOPIC: sqlserver.configs
+      OFFSET_STORAGE_TOPIC: sqlserver.offsets
+      STATUS_STORAGE_TOPIC: sqlserver.status
+    healthcheck:
+      test: curl --silent --head --fail http://localhost:8083/connectors >/dev/null || exit 1
+      <<: *healthcheck
+
+  kafka-connect-init:
+    image: *connect-image
+    restart: no
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+    env_file:
+      - .env
+    configs:
+      - source: kafka-connect-init.setup.sh
+        target: /init/setup.sh
+      - source: kafka-connect-init.sqlserver.json
+        target: /init/sqlserver.json
+    entrypoint:
+      - /bin/bash
+      - /init/setup.sh
+
+  ### UI
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    hostname: kafka-ui
+    restart: always
+    depends_on:
+      kafka:
+        condition: service_healthy
+    # ports:
+    #   - 8082:8080
+    environment:
+      SERVER_SERVLET_CONTEXT_PATH: /kafka
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    healthcheck:
+      test: java /healthcheck.java http://kafka-ui:8080/kafka/
+      <<: *healthcheck
+    configs:
+      - source: kafka-ui.healthcheck.java
+        target: /healthcheck.java
+
+  sqlserver-ui:
+    image: dbgate/dbgate:latest
+    hostname: sqlserver-ui
+    restart: always
+    depends_on: 
+      sqlserver:
+        condition: service_healthy
+    # ports:
+    #   - 8084:3000
+    environment:
+      CONNECTIONS: sqlserver
+      LABEL_sqlserver: sqlserver
+      SERVER_sqlserver: sqlserver
+      PORT_sqlserver: 1433
+      USER_sqlserver: sa
+      PASSWORD_sqlserver: *sa-password
+      ENGINE_sqlserver: mssql@dbgate-plugin-mssql
+    healthcheck:
+      test: curl --silent --head --fail  http://localhost:3000/ || exit 1
+      <<: *healthcheck
+    volumes:
+      - sqlserver-ui-data:/root/.dbgate
+  
+  nginx:
+    image: nginx
+    restart: always
+    depends_on:
+      kafka-ui:
+        condition: service_healthy
+      sqlserver-ui:
+        condition: service_healthy
+      kafka-connect:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - ${WEB_UI_PORT:-8080}:80
+    healthcheck:
+      test: curl --silent --head --fail http://localhost:80/ || exit 1
+      <<: *healthcheck
+    configs:
+      - source: nginx.default.conf
+        target: /etc/nginx/conf.d/default.conf
+      - source: nginx.index.html
+        target: /usr/share/nginx/html/index.html
+
+volumes:
+  zookeeper-data: {}
+  kafka-data: {}
+  sqlserver-data: {}
+  sqlserver-ui-data: {}
+
+configs:
+  # 
+  kafka-init.setup.sh:
+    content: |
+      #!/bin/bash
+      #
+      echo "Waiting for Kafka to start listening on kafka:9092 ⏳"
+      while ! nc -z kafka 9092; do
+        echo "Kafka not available yet..."
+        sleep 2
+      done
+      echo "Kafka is ready !"
+      #
+      for creds in $(set | grep -Po 'KAFKA_USER[0-9](?==)'); do
+        user="$${!creds/:*/}"
+        pass="$${!creds/*:/}"
+        echo "Adding user '$${user}'"
+        kafka-configs --alter \
+          --entity-type users \
+          --entity-name $${user} \
+          --add-config 'SCRAM-SHA-512=[password=$${pass}]' \
+          --bootstrap-server kafka:9092
+      done
+      #
+      # echo "Creating topic '$$TABLE_NAME'"
+      #   /usr/bin/kafka-topics \
+      #     --create \
+      #     --if-not-exists \
+      #     --topic $$TABLE_NAME \
+      #     --partitions 1 \
+      #     --replication-factor 1 \
+      #     --bootstrap-server kafka:9092
+      #
+      # echo "Seting permissions on topic '$$TABLE_NAME' for 'consumer_group_2'"
+      # kafka-acls --add \
+      #   --bootstrap-server kafka:9092 \
+      #   --allow-principal User:* \
+      #   --consumer \
+      #   --topic $$TABLE_NAME \
+      #   --group consumer_group_2
+  #
+  kafka-ui.healthcheck.java:
+    content: |
+      public class healthcheck {
+        public static void main(String[] args) {
+            try {
+                int code = ((java.net.HttpURLConnection) new java.net.URL(args[0]).openConnection()).getResponseCode();
+                if (code != 200) {
+                    System.exit(1);
+                }
+            } catch (Exception e) {
+                System.exit(1);
+            }
+            System.exit(0);
+        }
+      }
+  #
+  sqlserver.healthcheck.py:
+    content: |
+      import sys
+      import socket
+      try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+          s.settimeout(2)
+          s.connect(("localhost" , 1433))
+          sys.exit(0)
+      except socket.error:
+        sys.exit(1)
+  #
+  sqlserver-init.setup.sh:
+    content: |
+      #!/bin/bash
+      echo "Waiting for SQLServer to be ready... ⏳"
+      for i in {1..50}; do
+        if ! /opt/mssql-tools/bin/sqlcmd -Q "select 1" >/dev/null 2>/dev/null; then
+          echo "SqlServer not ready yet..."
+          sleep 2
+        else
+          echo "SqlServer is ready!"
+          break
+        fi
+      done
+      #
+      echo "Setting-up $$DB_NAME"
+      /opt/mssql-tools/bin/sqlcmd -i /init/setup.sql
+      #
+      rows="$(/opt/mssql-tools/bin/sqlcmd -d $$DB_NAME -h -1 -W -Q "set nocount on; select count(1) from $$TABLE_NAME")"
+      if [ $$rows -gt 0 ]; then
+        echo "Table '$$TABLE_NAME' already contains $$rows rows of data, skipping initial data import..."
+      else
+        echo "Table '$$TABLE_NAME' is empty - importing initial data:"
+        echo "Downloading CSV file"
+        curl --silent --location "$$TABLE_CSV_URL" > "/init/$$TABLE_NAME.csv"
+        #
+        echo "Importing CSV data"
+        /opt/mssql-tools/bin/bcp \
+          "$$DB_NAME.dbo.$$TABLE_NAME" \
+          in "/init/$$TABLE_NAME.csv" \
+          -c -t',' -F2 -S "$$SQLCMDSERVER" \
+          -U "$$SQLCMDUSER" -P "$$SQLCMDPASSWORD"
+      fi
+  # 
+  sqlserver-init.setup.sql:
+    content: |
+      -- Enable CLR
+      -- EXEC sp_configure 'clr enabled' , '1';  
+      -- RECONFIGURE;
+      -- GO
+      -- Create database
+      IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name = '$(DB_NAME)') 
+        CREATE DATABASE [$(DB_NAME)];
+      GO
+      --
+      USE [$(DB_NAME)];
+      GO
+      -- Enable CDC
+      IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name = '$(DB_NAME)' AND is_cdc_enabled = 1)
+        EXEC sys.sp_cdc_enable_db;
+      GO
+      -- Create table
+      IF NOT EXISTS(SELECT 1 FROM sysobjects WHERE name='$(TABLE_NAME)' AND xtype='U')
+        CREATE TABLE [$(TABLE_NAME)] ( $(TABLE_SCHEMA) );
+      GO
+      -- Enable CDC on table
+      IF NOT EXISTS(SELECT 1 FROM sysobjects WHERE name='dbo_$(TABLE_NAME)_CT' AND xtype='U') 
+        EXEC sys.sp_cdc_enable_table
+          @source_schema = 'dbo',
+          @source_name = '$(TABLE_NAME)',
+          @role_name = NULL;
+      GO
+      -- Create user for Debezium
+      IF NOT EXISTS(SELECT 1 FROM sys.database_principals WHERE name = '$(DBZ_USERNAME)')
+      BEGIN
+        CREATE LOGIN $(DBZ_USERNAME) WITH PASSWORD = '$(DBZ_PASSWORD)';
+        CREATE USER $(DBZ_USERNAME) FOR LOGIN $(DBZ_USERNAME);
+      END
+      GO
+      -- Grant necessary permissions
+      EXEC sp_addrolemember 'db_datareader', '$(DBZ_USERNAME)';
+      EXEC sp_addrolemember 'db_owner', '$(DBZ_USERNAME)';
+      GO
+  # 
+  kafka-connect-init.setup.sh:
+    content: |
+      #!/bin/bash
+      API_URL=http://kafka-connect:8083/connectors
+      if curl --silent --fail $$API_URL/sqlserver >/dev/null; then
+        echo "Debezium SqlServer connector is already registered"
+      else
+        echo "Registering Debezium SqlServer connector"
+        curl --silent --include --fail \
+          --request POST \
+          --header "Accept:application/json" \
+          --header "Content-Type:application/json" \
+          --data   "@/init/sqlserver.json" \
+          $$API_URL
+      fi
+      exit 0
+  # 
+  kafka-connect-init.sqlserver.json:
+    content: |
+      {
+        "name": "sqlserver",
+        "config": {
+          "connector.class": "io.debezium.connector.sqlserver.SqlServerConnector",
+          "tasks.max": "1",
+          "database.hostname": "sqlserver",
+          "database.server.name": "sqlserver",
+          "database.port": "1433",
+          "database.user": "$DBZ_USERNAME",
+          "database.password": "$DBZ_PASSWORD",
+          "database.dbname": "$DB_NAME",
+          "database.names": "$DB_NAME",
+          "table.include.list": "dbo.$TABLE_NAME",
+          "topic.prefix": "sqlserver",
+          "schema.history.internal.kafka.topic": "sqlserver.schema",
+          "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+          "database.encrypt": false
+        }
+      }
+
+  #
+  nginx.default.conf:
+    content: |
+      server {
+        listen       80;
+        listen  [::]:80;
+        server_name  localhost;
+
+        location / {
+          root   /usr/share/nginx/html;
+          index  index.html;
+        }
+
+        error_page   500 502 503 504  /50x.html;
+        location = /50x.html {
+          root   /usr/share/nginx/html;
+        }
+
+        location /kafka {
+          proxy_pass http://kafka-ui:8080/kafka;
+        }
+        location /sqlserver/ {
+          proxy_pass http://sqlserver-ui:3000/;
+        }
+        location /kafka-connect/ {
+          proxy_pass http://kafka-connect:8083/;
+        }
+        location /schema-registry/ {
+          proxy_pass http://schema-registry:8081/;
+        }
+      }
+  # 
+  nginx.index.html:
+    content: |
+      <html>
+        <head><title>moneybase</title></head>
+        <body>
+          <h1>moneybase</h1>
+          <ul>
+            <li><a href="/kafka">kafka</a></li> 
+            <li><a href="/sqlserver">sqlserver</a></li> 
+            <li><a href="/kafka-connect/">kafka-connect</a></li> 
+              <ul>
+                <li><a href="/kafka-connect/connectors">connectors</a></li> 
+                <li><a href="/kafka-connect/connectors/sqlserver">connectors/sqlserver</a></li> 
+              </ul>
+            <li><a href="/schema-registry/">schema-registry</a></li> 
+              <ul>
+                <li><a href="/schema-registry/subjects">subjects</a></li> 
+              </ul>
+          </ul>
+        </body>
+      </html>
