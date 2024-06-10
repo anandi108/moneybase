@@ -81,8 +81,8 @@ services:
       <<: *healthcheck
 
   sqlserver:
-    # image: &sqlserver-image mcr.microsoft.com/mssql/server:latest
-    image: mcr.microsoft.com/azure-sql-edge:latest
+    image: &sqlserver-image mcr.microsoft.com/mssql/server:latest
+    # image: mcr.microsoft.com/azure-sql-edge:latest # works on arm64 (macbook m1), but doesnt have CLR support, CDC doesn't work properly
     hostname: sqlserver
     restart: always
     ports:
@@ -93,12 +93,12 @@ services:
       MSSQL_PID:   Developer
       MSSQL_AGENT_ENABLED: true
       # 
-      # SQLCMDSERVER:   sqlserver
-      # SQLCMDUSER:     sa
-      # SQLCMDPASSWORD: *sa-password
+      SQLCMDSERVER:   sqlserver
+      SQLCMDUSER:     sa
+      SQLCMDPASSWORD: *sa-password
     healthcheck:
-      # test: /opt/mssql-tools/bin/sqlcmd -Q "select 1" || exit 1
-      test: python3 /healthcheck.py # in azure-sql-edge image there is no sqlcmd installed, neither netcat
+      test: /opt/mssql-tools/bin/sqlcmd -Q "select 1" || exit 1
+      # test: python3 /healthcheck.py # in azure-sql-edge image there is no sqlcmd installed, neither netcat
       <<: *healthcheck
     configs:
       - source: sqlserver.healthcheck.py
@@ -107,7 +107,7 @@ services:
       - sqlserver-data:/var/opt/mssql
 
   sqlserver-init:
-    # image: *sqlserver-image
+    # image: *sqlserver-image # doesn't have curl, only wget
     image: mcr.microsoft.com/mssql-tools:latest
     platform: linux/amd64
     restart: no
@@ -155,7 +155,7 @@ services:
       OFFSET_STORAGE_TOPIC: sqlserver.offsets
       STATUS_STORAGE_TOPIC: sqlserver.status
     healthcheck:
-      test: curl --silent --head --fail http://localhost:8083/connectors >/dev/null || exit 1
+      test: curl --silent --head --fail http://localhost:8083/connectors || exit 1
       <<: *healthcheck
 
   kafka-connect-init:
@@ -273,21 +273,22 @@ configs:
           --bootstrap-server kafka:9092
       done
       #
-      # echo "Creating topic '$$TABLE_NAME'"
+      # TOPIC_NAME="sqlserver.$$DB_NAME.dbo.$$TABLE_NAME"
+      # echo "Creating topic '$$TOPIC_NAME'"
       #   /usr/bin/kafka-topics \
       #     --create \
       #     --if-not-exists \
-      #     --topic $$TABLE_NAME \
+      #     --topic $$TOPIC_NAME \
       #     --partitions 1 \
       #     --replication-factor 1 \
       #     --bootstrap-server kafka:9092
       #
-      # echo "Seting permissions on topic '$$TABLE_NAME' for 'consumer_group_2'"
+      # echo "Seting permissions on topic '$$TOPIC_NAME' for 'consumer_group_2'"
       # kafka-acls --add \
       #   --bootstrap-server kafka:9092 \
       #   --allow-principal User:* \
       #   --consumer \
-      #   --topic $$TABLE_NAME \
+      #   --topic $$TOPIC_NAME \
       #   --group consumer_group_2
   #
   kafka-ui.healthcheck.java:
@@ -341,12 +342,12 @@ configs:
       else
         echo "Table '$$TABLE_NAME' is empty - importing initial data:"
         echo "Downloading CSV file"
-        curl --silent --location "$$TABLE_CSV_URL" > "/init/$$TABLE_NAME.csv"
+        curl --silent --location "$$TABLE_CSV_URL" > "/tmp/$$TABLE_NAME.csv"
         #
         echo "Importing CSV data"
         /opt/mssql-tools/bin/bcp \
           "$$DB_NAME.dbo.$$TABLE_NAME" \
-          in "/init/$$TABLE_NAME.csv" \
+          in "/tmp/$$TABLE_NAME.csv" \
           -c -t',' -F2 -S "$$SQLCMDSERVER" \
           -U "$$SQLCMDUSER" -P "$$SQLCMDPASSWORD"
       fi
