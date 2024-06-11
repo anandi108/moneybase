@@ -81,8 +81,7 @@ services:
       <<: *healthcheck
 
   sqlserver:
-    image: &sqlserver-image mcr.microsoft.com/mssql/server:latest
-    # image: mcr.microsoft.com/azure-sql-edge:latest # works on arm64 (macbook m1), but doesnt have CLR support, CDC doesn't work properly
+    image: &sqlserver-image ${SQLSERVER_IMAGE:-mcr.microsoft.com/mssql/server:latest}
     hostname: sqlserver
     restart: always
     ports:
@@ -97,8 +96,8 @@ services:
       SQLCMDUSER:     sa
       SQLCMDPASSWORD: *sa-password
     healthcheck:
-      test: /opt/mssql-tools/bin/sqlcmd -Q "select 1" || exit 1
-      # test: python3 /healthcheck.py # in azure-sql-edge image there is no sqlcmd installed, neither netcat
+      # test: /opt/mssql-tools/bin/sqlcmd -Q "select 1" || exit 1
+      test: python3 /healthcheck.py # in azure-sql-edge image there is no sqlcmd installed, neither netcat
       <<: *healthcheck
     configs:
       - source: sqlserver.healthcheck.py
