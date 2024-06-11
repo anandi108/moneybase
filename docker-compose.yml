@@ -220,6 +220,16 @@ services:
     volumes:
       - sqlserver-ui-data:/root/.dbgate
   
+  docker-logs:
+    image: amir20/dozzle:latest
+    restart: always
+    environment:
+      DOZZLE_BASE: /logs
+    # ports:
+    #   - 8085:8080
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+  
   nginx:
     image: nginx
     restart: always
@@ -232,6 +242,8 @@ services:
         condition: service_healthy
       schema-registry:
         condition: service_healthy
+      docker-logs:
+        condition: service_started
     ports:
       - ${WEB_UI_PORT:-8080}:80
     healthcheck:
@@ -461,6 +473,9 @@ configs:
         location /schema-registry/ {
           proxy_pass http://schema-registry:8081/;
         }
+        location /logs {
+          proxy_pass http://docker-logs:8080;
+        }
       }
   # 
   nginx.index.html:
@@ -472,15 +487,18 @@ configs:
           <ul>
             <li><a href="/kafka">kafka</a></li> 
             <li><a href="/sqlserver">sqlserver</a></li> 
-            <li><a href="/kafka-connect/">kafka-connect</a></li> 
+            <li><a href="/kafka-connect/">kafka-connect</a> 
               <ul>
                 <li><a href="/kafka-connect/connectors">connectors</a></li> 
                 <li><a href="/kafka-connect/connectors/sqlserver">connectors/sqlserver</a></li> 
               </ul>
-            <li><a href="/schema-registry/">schema-registry</a></li> 
+            </li>
+            <li><a href="/schema-registry/">schema-registry</a>
               <ul>
                 <li><a href="/schema-registry/subjects">subjects</a></li> 
               </ul>
+            </li>
+            <li><a href="/logs">logs</a></li> 
           </ul>
         </body>
       </html>
