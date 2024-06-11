@@ -81,8 +81,8 @@ services:
       <<: *healthcheck
 
   sqlserver:
-    image: &sqlserver-image mcr.microsoft.com/mssql/server:latest
-    # image: mcr.microsoft.com/azure-sql-edge:latest # works on arm64 (macbook m1), but doesnt have CLR support, CDC doesn't work properly
+    # image: &sqlserver-image mcr.microsoft.com/mssql/server:latest
+    image: mcr.microsoft.com/azure-sql-edge:latest # works on arm64 (macbook m1), but doesnt have CLR support, CDC doesn't work properly
     hostname: sqlserver
     restart: always
     ports:
@@ -97,8 +97,8 @@ services:
       SQLCMDUSER:     sa
       SQLCMDPASSWORD: *sa-password
     healthcheck:
-      test: /opt/mssql-tools/bin/sqlcmd -Q "select 1" || exit 1
-      # test: python3 /healthcheck.py # in azure-sql-edge image there is no sqlcmd installed, neither netcat
+      # test: /opt/mssql-tools/bin/sqlcmd -Q "select 1" || exit 1
+      test: python3 /healthcheck.py # in azure-sql-edge image there is no sqlcmd installed, neither netcat
       <<: *healthcheck
     configs:
       - source: sqlserver.healthcheck.py
@@ -220,7 +220,7 @@ services:
     volumes:
       - sqlserver-ui-data:/root/.dbgate
   
-  docker-logs:
+  logs-ui:
     image: amir20/dozzle:latest
     restart: always
     environment:
@@ -235,14 +235,14 @@ services:
     restart: always
     depends_on:
       kafka-ui:
-        condition: service_healthy
+        condition: service_started
       sqlserver-ui:
-        condition: service_healthy
+        condition: service_started
       kafka-connect:
-        condition: service_healthy
+        condition: service_started
       schema-registry:
-        condition: service_healthy
-      docker-logs:
+        condition: service_started
+      logs-ui:
         condition: service_started
     ports:
       - ${WEB_UI_PORT:-8080}:80
@@ -474,7 +474,7 @@ configs:
           proxy_pass http://schema-registry:8081/;
         }
         location /logs {
-          proxy_pass http://docker-logs:8080;
+          proxy_pass http://logs-ui:8080;
         }
       }
   # 
