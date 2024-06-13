@@ -184,7 +184,7 @@ services:
       kafka:
         condition: service_healthy
     # ports:
-    #   - 8082:8080
+    #   - 8180:8080
     environment:
       SERVER_SERVLET_CONTEXT_PATH: /kafka
       KAFKA_CLUSTERS_0_NAME: local
@@ -195,6 +195,26 @@ services:
     configs:
       - source: kafka-ui.healthcheck.java
         target: /healthcheck.java
+
+  schema-registry-ui:
+    image: landoop/schema-registry-ui
+    platform: linux/amd64
+    hostname: schema-registry-ui
+    environment:
+      SCHEMAREGISTRY_URL: http://schema-registry:8081
+      PROXY: true
+    # ports:
+    #   - 8181:8000
+
+  kafka-connect-ui:
+    image: landoop/kafka-connect-ui
+    platform: linux/amd64
+    hostname: kafka-connect-ui
+    environment:
+      CONNECT_URL: http://kafka-connect:8083
+      PROXY: true
+    # ports:
+    #   - 8183:8000
 
   sqlserver-ui:
     image: dbgate/dbgate:latest
@@ -248,6 +268,7 @@ services:
     healthcheck:
       test: curl --silent --head --fail http://localhost:80/ || exit 1
       <<: *healthcheck
+      interval: 5s
     configs:
       - source: nginx.default.conf
         target: /etc/nginx/conf.d/default.conf
@@ -463,13 +484,25 @@ configs:
         location /kafka {
           proxy_pass http://kafka-ui:8080/kafka;
         }
+        # 
         location /sqlserver/ {
           proxy_pass http://sqlserver-ui:3000/;
         }
+        # 
         location /kafka-connect/ {
+          proxy_pass http://kafka-connect-ui:8000/;
+        }
+        location /api/kafka-connect/ {
           proxy_pass http://kafka-connect:8083/;
         }
+        location /api/kafka-connect-1/ {
+          proxy_pass http://kafka-connect:8083/;
+        }
+        # 
         location /schema-registry/ {
+          proxy_pass http://schema-registry-ui:8000/;
+        }
+        location /api/schema-registry/ {
           proxy_pass http://schema-registry:8081/;
         }
         location /logs {
@@ -486,18 +519,24 @@ configs:
           <ul>
             <li><a href="/kafka">kafka</a></li> 
             <li><a href="/sqlserver">sqlserver</a></li> 
-            <li><a href="/kafka-connect/">kafka-connect</a> 
-              <ul>
-                <li><a href="/kafka-connect/connectors">connectors</a></li> 
-                <li><a href="/kafka-connect/connectors/sqlserver">connectors/sqlserver</a></li> 
-              </ul>
-            </li>
-            <li><a href="/schema-registry/">schema-registry</a>
-              <ul>
-                <li><a href="/schema-registry/subjects">subjects</a></li> 
-              </ul>
-            </li>
+            <li><a href="/kafka-connect/">kafka-connect</a></li>
+            <li><a href="/schema-registry/">schema-registry</a></li>
             <li><a href="/logs">logs</a></li> 
+            <li>API
+              <ul>
+                <li><a href="/api/kafka-connect/">kafka-connect</a> 
+                  <ul>
+                    <li><a href="/api/kafka-connect/connectors">connectors</a></li> 
+                    <li><a href="/api/kafka-connect/connectors/sqlserver">connectors/sqlserver</a></li> 
+                  </ul>
+                </li>
+                <li><a href="/api/schema-registry/">schema-registry</a>
+                  <ul>
+                    <li><a href="/api/schema-registry/subjects">subjects</a></li> 
+                  </ul>
+                </li>
+              </ul>
+            </li>
           </ul>
         </body>
       </html>
