@@ -481,6 +481,13 @@ configs:
           root   /usr/share/nginx/html;
         }
 
+        location /zookeeper/ {
+          proxy_pass http://zookeeper:8080/commands/;
+          sub_filter_once off;
+          sub_filter_types *;
+          sub_filter ' href="/commands' ' href="/zookeeper';
+        }
+        # 
         location /kafka {
           proxy_pass http://kafka-ui:8080/kafka;
         }
@@ -517,6 +524,7 @@ configs:
         <body>
           <h1>moneybase</h1>
           <ul>
+            <li><a href="/zookeeper">zookeeper</a></li> 
             <li><a href="/kafka">kafka</a></li> 
             <li><a href="/sqlserver">sqlserver</a></li> 
             <li><a href="/kafka-connect/">kafka-connect</a></li>
